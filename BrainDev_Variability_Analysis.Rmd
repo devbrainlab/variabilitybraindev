@@ -1,0 +1,1964 @@
+---
+title: "BrainDev_Variability_Analysis"
+author: "Megan Herting & Kimberly Siegmund & Kate Mills"
+date: "30/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Turn off scientific notation
+options(scipen=999)
+
+# Load libraries
+packages <- c("Hmisc","Rmisc","tidyr", "nlme",
+              "MASS","ggplot2","dplyr","lme4",
+              "MuMIn","mgcv","broom", "gratia", 
+              "splines","psych","table1",
+              "skimr","magrittr","qwraps2")
+lapply(packages, library, character.only = TRUE)
+
+# Load kate theme
+theme_kate <- function () { 
+  theme_bw() +
+  theme_minimal(base_size = 12, base_family = "Arial") +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        axis.text = element_text(size=14),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+}
+```
+
+# Tabulate sample sizes and print descriptives table
+```{r}
+#xtabs(~data$visit+data$sex+data$dataset)
+
+# https://cran.r-project.org/web/packages/table1/vignettes/table1-examples.html
+table1::table1(~age | dataset + sex, data = data)
+
+```
+
+# Print study design
+```{r}
+study_design <- data[order(data$age, data$Subject,data$visit),]
+study_design <- study_design %>%
+  mutate(Rank_nr=as.numeric(factor(Subject,levels=unique(Subject))))
+
+study_design_plot<- ggplot(study_design,
+                           aes(x=age,
+                               y=Rank_nr,
+                               group=Subject,
+                               col=dataset,
+                               shape=sex)) + 
+  geom_point(alpha=1) + 
+  geom_line(alpha=.4) +
+  theme(axis.text.y = element_blank()) +
+  scale_color_manual(name= "dataset",
+                     labels = c("BrainTime", "NCD", "LunaCog"),
+                     values = c("forestgreen","dodgerblue", "orchid"))  +
+  ylab("") +
+  xlab("Age (years)")+
+  scale_y_discrete(breaks=NULL) +
+  theme_kate()
+print(study_design_plot)
+
+ggsave(filename="study_design.png",
+       plot=study_design_plot, width=6, height=5, units='in', dpi=300)
+
+#Print biological sex histogram
+
+sex_histogram <- ggplot(data,aes(x=age,fill=sex))+
+  scale_fill_manual(aes(fill=sex),
+                     labels = c("female", "male"),
+                     values = c("#FDE74C", "#56A3A6")) +
+  geom_histogram(alpha=1, position="stack",binwidth=1) +
+  xlim(7,27) +
+  ggtitle("") +
+  guides(fill=guide_legend(title="Sex"))+
+  ylab("N") +
+  theme_kate()
+sex_histogram
+
+ggsave(filename="sex_histogram.png",
+       plot=sex_histogram, width=6, height=5, units='in', dpi=300)
+```
+
+# Set Variables of Interest
+```{r}
+vars<-c("TotalGrayVol",
+        "CortexVol",
+        "MeanThickness_thickness",
+        "WhiteSurfArea_area",
+        "CerebralWhiteMatterVol",
+        "SubCortGrayVol",
+        "Amygdala",
+        "Hippocampus",
+        "ThalamusProper",
+        "Pallidum",
+        "Caudate",
+        "Putamen")
+varlabels<-c("Total Gray Matter Volume",
+             "Cortex Volume",
+             "Mean Cortical Thickness",
+             "White Surface Area",
+             "Cerebral White Matter Volume",
+             "Subcortical Gray Matter Volume",
+             "Amygdala",
+             "Hippocampus",
+             "Thalamus",
+             "Pallidum",
+             "Caudate",
+             "Putamen")
+
+bothvarlists<-cbind(vars,varlabels)
+
+```
+
+# Calculate change in age between waves and Calculate mid point of age between waves for symmetric comparison
+```{r}
+agechange<-data %>% 
+  select("Subject",
+         "visit",
+         "age") %>%
+  spread(visit, age) %>%
+  mutate(wave12=(`2`-`1`),
+         wave23=(`3`-`2`)) %>%
+  mutate(`1`=wave12,
+         `2`=wave23) %>%
+  select(Subject,`1`,`2`)%>%
+  gather(visit,agechange,2:3)
+
+data<-left_join(data,agechange)
+
+avgage<-data %>% 
+  select("Subject",
+         "visit",
+         "age") %>%
+  spread(visit, age) %>%
+  mutate(wave12=((`2`+`1`)/2),
+         wave23=((`3`+`2`)/2)) %>%
+  mutate(`1`=wave12,
+         `2`=wave23) %>%
+  select(Subject,`1`,`2`)%>%
+  gather(visit,avgage,2:3)
+
+data<-left_join(data,avgage)
+
+```
+
+# Are there significant differences in scan intervals between sites?
+```{r}
+intervalnull <- lmer(agechange ~ 1 + (1|Subject), data=data, na.action = na.omit)
+interval_dataset <- lmer(agechange ~ dataset + (1|Subject), data=data, na.action = na.omit)
+interval_dataset_siteR <- lmer(agechange ~ dataset +(1|Subject/dataset), data=data, na.action = na.omit)
+interval_annualchange <- 
+summary(interval_dataset)
+anova(intervalnull,interval_dataset)
+anova(interval_dataset,interval_dataset_siteR)
+
+sd(na.omit(data$agechange))
+
+```
+
+# Do standard deviations vary with age?
+```{r}
+stdev_by_age<-lapply(X = 1:12,
+                     FUN = function(X){
+                       meas=as.character(bothvarlists[X,1])
+                       nameofmeas=as.character(bothvarlists[X,2])
+                       
+                       
+                       brainchange<-data %>% 
+                         select("Subject",
+                                "visit",
+                                meas) %>%
+                         spread(visit, meas) %>%
+                         mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                                wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                         mutate(`1`=wave12,
+                                `2`=wave23) %>%
+                         select(Subject,`1`,`2`)%>%
+                         gather(visit,brainchange,2:3)
+                       
+                       changechange<-left_join(agechange,brainchange) %>%
+                         mutate(change=brainchange/agechange) 
+                       
+                       changedeviation<-sd((changechange %>% select(change))[,1])
+                       
+                       changechange<- changechange%>%
+                         mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                                  "decrease",
+                                                  ifelse(change>=changedeviation,
+                                                         "increase",
+                                                         "stable"))) %>%
+                         mutate(changetype=factor(changetype, 
+                                                  levels = c("increase", 
+                                                             "stable", 
+                                                             "decrease")))
+                       
+                       plotdata<-(left_join(data,changechange))
+                       plotdata$sex<-as.ordered(plotdata$sex)
+                       
+                       assign(paste0(meas,"_stdev"),cbind(plotdata %>%
+                                                            select(change,avgage,Subject,visit,sex,changetype) %>%
+                                                            mutate(roundedage=as.factor(round(avgage,0))) %>%
+                                                            group_by(roundedage) %>%
+                                                            summarize(stdev=sd(change),
+                                                                      sum=n()) %>%
+                                                            filter(!is.na(roundedage),
+                                                                   !roundedage==9,
+                                                                   !roundedage==24)
+                                                          ,nameofmeas))
+                       get(paste0(meas,"_stdev"))
+                     })
+
+output<-bind_rows(stdev_by_age, .id = "id")%>%
+  mutate(id=as.integer(id))
+
+
+output_global<-output %>% filter(!id>=6)
+output_subcortical<-output %>% filter(!id<6)
+
+# Put the global measures together
+stdevsbyage_global<-
+  ggplot(data=NULL,
+         aes(x=as.numeric(as.character(roundedage)),
+             y=stdev,
+             fill=nameofmeas))+
+  ylab("Standard Deviation of Annualized Percent Change")+
+  xlab("Age (years) as averaged between observations and rounded")+
+  ggtitle("Global and Cortical Measures")+
+  scale_color_manual(aesthetics = c("colour","fill"),
+                     name= "Brain Measure",
+                     values = c("#8338EC", "#FB5607","#FFBE0B","#FF006E","#3A86FF")) +
+  geom_line(data=output_global,
+            aes(x=as.numeric(as.character(roundedage)), y=stdev,
+                colour=nameofmeas),
+            size=1)+
+  theme_kate()
+
+stdevsbyage_global
+
+ggsave(filename=paste0("stdevsbyage_global.png"),
+       plot=stdevsbyage_gloabl, 
+       width=7, height=4, units='in', dpi=300)
+
+
+# Put the subcortical measures together
+stdevsbyage_subcortical<-
+  ggplot(data=NULL,
+         aes(x=as.numeric(as.character(roundedage)),
+             y=stdev,
+             fill=nameofmeas))+
+  ylab("Standard Deviation of Annualized Percent Change")+
+  xlab("Age (years) as averaged between observations and rounded")+
+  ggtitle("Subcortical Measures")+
+  scale_color_manual(aesthetics = c("colour","fill"),
+                     name= "Brain Measure",
+                     values = c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  geom_line(data=output_subcortical,
+            aes(x=as.numeric(as.character(roundedage)), y=stdev,
+                colour=nameofmeas),
+            size=1)+
+  theme_kate()
+
+stdevsbyage_subcortical
+
+ggsave(filename=paste0("stdevsbyage_subcortical.png"),
+       plot=stdevsbyage_subcortical, 
+       width=7, height=4, units='in', dpi=300)
+
+## relate age to stdev
+output_ra<-output %>%
+  mutate(roundedage=as.integer(as.character(roundedage)))
+stdev_by_age_models<-lapply(X = 1:12,
+                            FUN = function(X){
+                              output <- output_ra %>%
+                                filter(id==`X`)
+                              meas=as.character(bothvarlists[X,1])
+                              nameofmeas=as.character(bothvarlists[X,2])
+                              model_agemeas<-gam(stdev ~ s(roundedage, bs = 'cs', k = 4),
+                                                 data=output)
+                              summary(model_agemeas)
+                              cbind(nameofmeas,
+                                    round(summary(model_agemeas)$s.table[1,1],3),
+                                    round(summary(model_agemeas)$s.table[1,2],3),
+                                    round(summary(model_agemeas)$s.table[1,3],2),
+                                    round(summary(model_agemeas)$s.table[1,4],4))
+                            }
+)
+output_models <- data.frame(matrix(unlist(stdev_by_age_models),
+                                   nrow=length(stdev_by_age_models),
+                                   byrow=TRUE)) %>%
+  mutate(edf=X2,
+         ref.df=X3,
+         Fval=X4,
+         pval=X5) %>%
+  select(-X5,-X4,-X3,-X2)
+
+```
+
+# Does the direction of change vary by age?
+```{r}
+type_by_age<-lapply(X = 1:12,
+                    FUN = function(X){
+                      meas=as.character(bothvarlists[X,1])
+                      nameofmeas=as.character(bothvarlists[X,2])
+                      
+                      brainchange<-data %>% 
+                        select("Subject",
+                               "visit",
+                               meas) %>%
+                        spread(visit, meas) %>%
+                        mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                               wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                        mutate(`1`=wave12,
+                               `2`=wave23) %>%
+                        select(Subject,`1`,`2`)%>%
+                        gather(visit,brainchange,2:3)
+                      
+                      changechange<-left_join(agechange,brainchange) %>%
+                        mutate(change=brainchange/agechange) 
+                      
+                      changedeviation<-sd((changechange %>% select(change))[,1])
+                      
+                      changechange<- changechange %>%
+                        mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                                 "decrease",
+                                                 ifelse(change>=changedeviation,
+                                                        "increase",
+                                                        "stable"))) %>%
+                        mutate(changetype=factor(changetype, 
+                                                 levels = c("increase", 
+                                                            "stable", 
+                                                            "decrease")))
+                      
+                      plotdata<-(left_join(data,changechange))
+                      plotdata$sex<-as.ordered(plotdata$sex)
+                      
+                      assign(paste0(meas,"_changetypelong"),
+                             cbind(plotdata %>%
+                                     select(avgage,Subject,visit,sex,changetype) %>%
+                                     filter(!visit==3) %>%
+                                     mutate(agebin=ifelse(avgage<=13,"early",
+                                                          ifelse(avgage>13 & avgage<18,"mid",
+                                                                 ifelse( avgage>=18,"late","NA"))),
+                                            nameofmeas)))
+                      
+                      
+                      testchsq<-chisq.test(as.factor(get(paste0(meas,"_changetypelong"))$agebin),                get(paste0(meas,"_changetypelong"))$changetype)
+                      
+                      testchsqearlymid<-chisq.test(as.factor((get(paste0(meas,"_changetypelong"))%>%filter(!agebin=="late"))$agebin),(get(paste0(meas,"_changetypelong"))%>%filter(!agebin=="late"))$changetype)
+                      
+                      testchsqmidlate<-chisq.test(as.factor((get(paste0(meas,"_changetypelong"))%>%filter(!agebin=="early"))$agebin),(get(paste0(meas,"_changetypelong"))%>%filter(!agebin=="early"))$changetype)
+                      
+                      assign(paste0(meas,"_changetypelongtest"),
+                             cbind(nameofmeas,
+                                   round(testchsq$statistic,3),
+                                   testchsq$parameter,
+                                   round(testchsq$p.value,5)))
+                      
+                      assign(paste0(meas,"_changetypelongtestearlymid"),
+                             cbind(nameofmeas,
+                                   round(testchsqearlymid$statistic,3),
+                                   testchsqearlymid$parameter,
+                                   round(testchsqearlymid$p.value,5)))
+                      
+                      assign(paste0(meas,"_changetypelongtestmidlate"),
+                             cbind(nameofmeas,
+                                   round(testchsqmidlate$statistic,3),
+                                   testchsqmidlate$parameter,
+                                   round(testchsqmidlate$p.value,5)))
+                      
+                      
+                      get(paste0(meas,"_changetypelongtestmidlate"))
+                    })
+```
+
+Loop through brain vars to generate variability plots for absolute measurements
+```{r}
+abschangestds<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(`2`-`1`),
+                          wave23=(`3`-`2`)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 print(paste0(nameofmeas," ",round(changedeviation,2)))
+               })
+
+compare_includingsiteR<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 fulldeviation<-sd((data %>% select(meas))[,1])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(`2`-`1`),
+                          wave23=(`3`-`2`)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 
+                 changechange<- changechange%>%
+                   mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                            "decrease",
+                                           ifelse(change>=changedeviation,
+                                                  "increase",
+                                                   "stable"))) %>%
+                   mutate(changetype=factor(changetype, 
+                                            levels = c("increase", 
+                                                       "stable", 
+                                                       "decrease")))
+                 
+                 plotdata<-(left_join(data,changechange))
+                 plotdata$sex<-as.ordered(plotdata$sex)
+                 
+                 assign(paste0("gammmod_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                 
+                 assign(paste0("gammmodsiteR_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1,
+                                        dataset=~1),
+                            data=(plotdata)))
+                 comparesiteR<-anova(get(paste0("gammmodsiteR_",meas))$lme,get(paste0("gammmod_",meas))$lme)
+                 cbind(meas,comparesiteR$`p-value`[2])
+})
+
+abs_variability_plots<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 fulldeviation<-sd((data %>% select(meas))[,1])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(`2`-`1`),
+                          wave23=(`3`-`2`)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 
+                 changechange<- changechange%>%
+                   mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                            "decrease",
+                                           ifelse(change>=changedeviation,
+                                                  "increase",
+                                                   "stable"))) %>%
+                   mutate(changetype=factor(changetype, 
+                                            levels = c("increase", 
+                                                       "stable", 
+                                                       "decrease")))
+                 
+                 plotdata<-(left_join(data,changechange))
+                 plotdata$sex<-as.ordered(plotdata$sex)
+                 
+                 assign(paste0("gammmod_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                        
+                 avgage<-round(seq(min(plotdata$avgage,na.rm = TRUE),
+                                    max(plotdata$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,
+                                              change))
+                 rm(avgage,data.pred,y.pred,y.upper,y.lower)
+                 
+                 
+                 assign(paste0("abslinedplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "dataset",
+                                             labels = c("BrainTime","NCD", "LunaCog"),
+                                             values = c("forestgreen","dodgerblue", "orchid")) +
+                          scale_shape_manual(name = "Observation period",
+                                             labels = c("time points 1-2", "time points 2-3"),
+                                             values = c(17,19))+
+                          geom_line(data=(plotdata %>% filter(!visit==3)),
+                                    aes(group=Subject,
+                                        colour=dataset),
+                                    alpha=0.4,
+                                    size=.6) +
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=dataset,
+                                         shape=visit),
+                                     size=1.5,
+                                     alpha=0.5) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="purple2")+
+                          geom_ribbon(data=get(paste0("pred_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="purple2")+
+                          theme_kate())
+                 
+                   ggsave(filename=paste0("abslinedplot_",meas,".png"),
+                          plot=get(paste0("abslinedplot_",meas)), 
+                          width=6, height=4, units='in', dpi=300)
+
+                 assign(paste0("absunlinedplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "dataset",
+                                             labels = c("BrainTime","NCD", "LunaCog"),
+                                             values = c("forestgreen","dodgerblue", "orchid")) +
+                          scale_shape_manual(name = "Observation period",
+                                             labels = c("time points 1-2", "time points 2-3"),
+                                             values = c(17,19))+
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=dataset,
+                                         shape=visit),
+                                     size=1.5,
+                                     alpha=0.6) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="purple2")+
+                          geom_ribbon(data=get(paste0("pred_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="purple2")+
+                          theme_kate())
+                 
+                   ggsave(filename=paste0("absunlinedplot_",meas,".png"),
+                          plot=get(paste0("absunlinedplot_",meas)),
+                          width=6, height=4, units='in', dpi=300)
+                  
+                  
+                 assign(paste0("absstackedplot_",meas),
+                        ggplot((plotdata %>% 
+                                  filter(!visit==3)),
+                               aes(x = as.integer(avgage),
+                                   y = 1,
+                                   fill=changetype)) +
+                          geom_bar(stat="identity",
+                                   width = 0.5)+
+                          xlab("Age (years) as averaged between observations")+
+                          ylab("Number of observations")+
+                          ggtitle(nameofmeas)+
+                          scale_fill_manual(name= "Direction of change",
+                                             labels = c("increase", "stable", "decrease"),
+                                             values = c("#564787","#72E1D1", "#EA3788")) +
+                          theme_kate())
+        
+                  ggsave(filename=paste0("absstackedplot_",meas,".png"),
+                         plot=get(paste0("absstackedplot_",meas)), width=6, height=4, units='in', dpi=300)
+                  
+                 
+                 assign(paste0("abspercentstackedplot_",meas),
+                        ggplot((plotdata %>% 
+                                  filter(!visit==3,
+                                         !avgage<9,
+                                         !avgage>24)),
+                               aes(x = as.integer(avgage),
+                                   y = 1,
+                                   fill=changetype)) +
+                          geom_bar(stat="identity",
+                                   position="fill",
+                                   width = 0.5)+
+                          xlab("Age (years) as averaged between observations")+
+                          ylab("Percentage of observations")+
+                          ggtitle(nameofmeas)+
+                          scale_fill_manual(name= "Direction of change",
+                                             labels = c("increase", "stable", "decrease"),
+                                             values = c("#564787","#72E1D1", "#EA3788")) +
+                          theme_kate())
+        
+                  ggsave(filename=paste0("abspercentstackedplot_",meas,".png"),
+                         plot=get(paste0("abspercentstackedplot_",meas)), width=6, height=4, units='in', dpi=300)
+                 
+                  
+                  ###########################################
+                  ############ FEMALES VS MALES #############
+                  ###########################################
+                  
+                 females<-plotdata %>% filter(sex=="female")
+                  assign(paste0("gammmod_female_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(females)))
+                        summary(get(paste0("gammmod_female_",meas))$gam)
+                        
+                 avgage<-round(seq(min(females$avgage,na.rm = TRUE),
+                                    max(females$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_female_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_females_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,
+                                              change))
+                 rm(avgage,data.pred,y.pred,y.upper,y.lower)
+                 
+                 males<-plotdata %>% filter(sex=="male")
+                  assign(paste0("gammmod_male_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(males)))
+                        summary(get(paste0("gammmod_male_",meas))$gam)
+                        
+                 avgage<-round(seq(min(males$avgage,na.rm = TRUE),
+                                    max(males$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_male_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_males_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,change))
+                 
+                 
+                 # Graph it
+                 assign(paste0("absgammsexplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "Sex",
+                                             labels = c("female", "male"),
+                                             values = c("#FDE74C", "#56A3A6")) +
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=sex),
+                                     size=1.5,
+                                     alpha=0.6) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_males_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="#56A3A6")+
+                          geom_ribbon(data=get(paste0("pred_males_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="#56A3A6")+
+                          geom_line(data=get(paste0("pred_females_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="#FDE74C")+
+                          geom_ribbon(data=get(paste0("pred_females_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="#FDE74C")+
+                          theme_kate())
+                 
+                  ggsave(filename=paste0("absgammsexplot_",meas,".png"),
+                         plot=get(paste0("absgammsexplot_",meas)),
+                         width=6, height=4, units='in', dpi=300)
+                 
+               }
+)
+```
+
+Loop through brain vars to assess if females and males differ in developmental change patterns for absolute measures
+```{r echo=FALSE}
+
+lapply(X = 12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(`2`-`1`),
+                          wave23=(`3`-`2`)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                
+                 plotdata<-(left_join(data,changechange))
+                 plotdata$sex<-as.ordered(plotdata$sex)
+                
+                
+                 assign(paste0("gammmod_fullsexint_",meas),
+                        gamm(change ~ sex +
+                               s(avgage,bs = "cs",k=4) + 
+                               s(avgage,by=sex,k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                 
+                 assign(paste0("gammmod_mainsexint_",meas),
+                        gamm(change ~ sex + s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                 
+                  assign(paste0("gammmod_ageonly_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                  
+                  assign(paste0("modcompare_",meas),
+                        anova(get(paste0("gammmod_ageonly_",meas))$lme,
+                        get(paste0("gammmod_mainsexint_",meas))$lme,
+                        get(paste0("gammmod_fullsexint_",meas))$lme))
+                 
+                 print(meas)
+                 get(paste0("modcompare_",meas))
+               }
+)
+
+```
+
+Loop through brain vars to generate variability plots for proportional measurements
+```{r}
+prochangestds<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 fulldeviation<-sd((data %>% select(meas))[,1])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                          wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 print(paste0(nameofmeas," ",round(changedeviation,2)))
+               })
+
+
+compare_includingsiteR<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 fulldeviation<-sd((data %>% select(meas))[,1])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                          wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 
+                 changechange<- changechange%>%
+                   mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                            "decrease",
+                                           ifelse(change>=changedeviation,
+                                                  "increase",
+                                                   "stable"))) %>%
+                   mutate(changetype=factor(changetype, 
+                                            levels = c("increase", 
+                                                       "stable", 
+                                                       "decrease")))
+                 
+                 plotdata<-(left_join(data,changechange))
+                 
+                 assign(paste0("gammmod_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                  summary(get(paste0("gammmod_",meas))$gam)
+                 
+                 assign(paste0("gammmodsiteR_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1,
+                                        dataset=~1),
+                            data=(plotdata)))
+                 comparesiteR<-anova(get(paste0("gammmodsiteR_",meas))$lme,get(paste0("gammmod_",meas))$lme)
+                 cbind(meas,comparesiteR$`p-value`[2])
+})
+
+pro_variability_plots<-lapply(X = 1:12,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 fulldeviation<-sd((data %>% select(meas))[,1])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                   mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                          wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                 
+                 changedeviation<-sd((changechange %>% select(change))[,1])
+                 
+                 changechange<- changechange%>%
+                   mutate(changetype=ifelse(change<=as.numeric(-(changedeviation)),
+                                            "decrease",
+                                           ifelse(change>=changedeviation,
+                                                  "increase",
+                                                   "stable"))) %>%
+                   mutate(changetype=factor(changetype, 
+                                            levels = c("increase", 
+                                                       "stable", 
+                                                       "decrease")))
+                 
+                 plotdata<-(left_join(data,changechange))
+                 
+                 assign(paste0("gammmod_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                  summary(get(paste0("gammmod_",meas))$gam)
+                        
+                 avgage<-round(seq(min(plotdata$avgage,na.rm = TRUE),
+                                    max(plotdata$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,
+                                              change))
+                 rm(avgage,data.pred,y.pred,y.upper,y.lower)
+                 
+                 
+                 assign(paste0("prolinedplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Annualized percent change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "dataset",
+                                             labels = c("BrainTime","NCD", "LunaCog"),
+                                             values = c("forestgreen","dodgerblue", "orchid")) +
+                          scale_shape_manual(name = "Observation period",
+                                             labels = c("time points 1-2", "time points 2-3"),
+                                             values = c(17,19))+
+                          geom_line(data=(plotdata %>% filter(!visit==3)),
+                                    aes(group=Subject,
+                                        colour=dataset),
+                                    alpha=0.4,
+                                    size=.6) +
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=dataset,
+                                         shape=visit),
+                                     size=1.5,
+                                     alpha=0.5) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="purple2")+
+                          geom_ribbon(data=get(paste0("pred_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="purple2")+
+                          theme_kate())
+                 
+                   ggsave(filename=paste0("prolinedplot_",meas,".png"),
+                          plot=get(paste0("prolinedplot_",meas)), 
+                          width=6, height=4, units='in', dpi=300)
+
+                 assign(paste0("prounlinedplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Annualized percent change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "dataset",
+                                             labels = c("BrainTime","NCD", "LunaCog"),
+                                             values = c("forestgreen","dodgerblue", "orchid")) +
+                          scale_shape_manual(name = "Observation period",
+                                             labels = c("time points 1-2", "time points 2-3"),
+                                             values = c(17,19))+
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=dataset,
+                                         shape=visit),
+                                     size=1.5,
+                                     alpha=0.6) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="purple2")+
+                          geom_ribbon(data=get(paste0("pred_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="purple2")+
+                          theme_kate())
+                 
+                   ggsave(filename=paste0("prounlinedplot_",meas,".png"),
+                          plot=get(paste0("prounlinedplot_",meas)),
+                          width=6, height=4, units='in', dpi=300)
+                  
+                  
+                 assign(paste0("prostackedplot_",meas),
+                        ggplot((plotdata %>% 
+                                  filter(!visit==3)),
+                               aes(x = as.integer(avgage),
+                                   y = 1,
+                                   fill=changetype)) +
+                          geom_bar(stat="identity",
+                                   width = 0.5)+
+                          xlab("Age (years) as averaged between observations")+
+                          ylab("Number of observations")+
+                          ggtitle(nameofmeas)+
+                          scale_fill_manual(name= "Direction of change",
+                                             labels = c("increase", "stable", "decrease"),
+                                             values = c("#564787","#72E1D1", "#EA3788")) +
+                          theme_kate())
+        
+                  ggsave(filename=paste0("prostackedplot_",meas,".png"),
+                         plot=get(paste0("prostackedplot_",meas)), width=6, height=4, units='in', dpi=300)
+                  
+                 
+                 assign(paste0("propercentstackedplot_",meas),
+                        ggplot((plotdata %>% 
+                                  filter(!visit==3,
+                                         !avgage<9,
+                                         !avgage>24)),
+                               aes(x = as.integer(avgage),
+                                   y = 1,
+                                   fill=changetype)) +
+                          geom_bar(stat="identity",
+                                   position="fill",
+                                   width = 0.5)+
+                          xlab("Age (years) as averaged between observations")+
+                          ylab("Percentage of observations")+
+                          ggtitle(nameofmeas)+
+                          scale_fill_manual(name= "Direction of change",
+                                             labels = c("increase", "stable", "decrease"),
+                                             values = c("#564787","#72E1D1", "#EA3788")) +
+                          theme_kate())
+        
+                  ggsave(filename=paste0("propercentstackedplot_",meas,".png"),
+                         plot=get(paste0("propercentstackedplot_",meas)), width=6, height=4, units='in', dpi=300)
+                 
+                  
+                  ###########################################
+                  ############ FEMALES VS MALES #############
+                  ###########################################
+                  
+                 females<-plotdata %>% filter(sex=="female")
+                  assign(paste0("gammmod_female_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(females)))
+                        summary(get(paste0("gammmod_female_",meas))$gam)
+                        
+                 avgage<-round(seq(min(females$avgage,na.rm = TRUE),
+                                    max(females$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_female_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_females_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,
+                                              change))
+                 rm(avgage,data.pred,y.pred,y.upper,y.lower)
+                 
+                 males<-plotdata %>% filter(sex=="male")
+                  assign(paste0("gammmod_male_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(males)))
+                        summary(get(paste0("gammmod_male_",meas))$gam)
+                        
+                 avgage<-round(seq(min(males$avgage,na.rm = TRUE),
+                                    max(males$avgage,na.rm = TRUE),by=1),2)
+                 data.pred = data.frame(avgage=avgage)
+                 y.pred = predict(get(paste0("gammmod_male_",meas))$gam,
+                     newdata=data.pred,se=T)
+                 data.pred = cbind.data.frame(data.pred,
+                                              y.pred)
+                 scale = 1.96
+                 y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                 y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                 change<-data.pred$fit
+                 assign(paste0("pred_males_",meas),cbind.data.frame(data.pred,
+                                              y.lower,
+                                              y.upper,change))
+                 
+                 
+                 # Graph it
+                 assign(paste0("progammsexplot_",meas),
+                        ggplot(data=NULL,
+                               aes(x=avgage,
+                                   y=change))+
+                          ylab("Annualized percent change between observations")+
+                          xlab("Age (years) as averaged between observations")+
+                          ggtitle(nameofmeas)+
+                          scale_color_manual(name= "Sex",
+                                             labels = c("female", "male"),
+                                             values = c("#FDE74C", "#56A3A6")) +
+                          geom_point(data=(plotdata %>% filter(!visit==3)),
+                                     aes(colour=sex),
+                                     size=1.5,
+                                     alpha=0.6) +
+                          geom_hline(yintercept=0, 
+                                     linetype="dashed", 
+                                     colour="black",
+                                     size=1)+
+                          geom_hline(yintercept=as.numeric(-(changedeviation)),
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_hline(yintercept=changedeviation, 
+                                     linetype="dashed", 
+                                     colour="grey",
+                                     size=.5)+
+                          geom_line(data=get(paste0("pred_males_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="#56A3A6")+
+                          geom_ribbon(data=get(paste0("pred_males_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="#56A3A6")+
+                          geom_line(data=get(paste0("pred_females_",meas)),
+                                    aes(x=avgage, y=change),
+                                    size=1,
+                                    colour="#FDE74C")+
+                          geom_ribbon(data=get(paste0("pred_females_",meas)),
+                                      aes(ymin=y.lower,
+                                          ymax=y.upper),
+                                      alpha=0.4,
+                                      fill="#FDE74C")+
+                          theme_kate())
+                 
+                  ggsave(filename=paste0("progammsexplot_",meas,".png"),
+                         plot=get(paste0("progammsexplot_",meas)),
+                         width=6, height=4, units='in', dpi=300)
+                 
+               }
+)
+```
+
+Make a lovely plot of all brain vars superimposed on the same graph
+```{r}
+pro_models<-lapply(X = 1:12,
+                   FUN = function(X){
+                     meas=as.character(bothvarlists[X,1])
+                     nameofmeas=as.character(bothvarlists[X,2])
+                     
+                     fulldeviation<-sd((data %>% select(meas))[,1])
+                     
+                     brainchange<-data %>% 
+                       select("Subject",
+                              "visit",
+                              meas) %>%
+                       spread(visit, meas) %>%
+                       mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                              wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                       mutate(`1`=wave12,
+                              `2`=wave23) %>%
+                       select(Subject,`1`,`2`)%>%
+                       gather(visit,brainchange,2:3)
+                     
+                     changechange<-left_join(agechange,brainchange) %>%
+                       mutate(change=brainchange/agechange) 
+                  
+                     
+                     plotdata<-(left_join(data,changechange))
+                     
+                     assign(paste0("gammmod_",meas),
+                            gamm(change ~ s(avgage,bs = "cs",k=4),
+                                 random=list(Subject=~1),
+                                 data=(plotdata)))
+                     summary(get(paste0("gammmod_",meas))$gam)
+                     
+                     avgage<-round(seq(min(plotdata$avgage,na.rm = TRUE),
+                                       max(plotdata$avgage,na.rm = TRUE),by=1),2)
+                     data.pred = data.frame(avgage=avgage)
+                     y.pred = predict(get(paste0("gammmod_",meas))$gam,
+                                      newdata=data.pred,se=T)
+                     data.pred = cbind.data.frame(data.pred,
+                                                  y.pred)
+                     scale = 1.96
+                     y.upper = y.pred$fit + (scale*y.pred$se.fit)
+                     y.lower = y.pred$fit - (scale*y.pred$se.fit)
+                     change<-data.pred$fit
+                     assign(paste0("pred_",meas),cbind.data.frame(data.pred,
+                                                                  y.lower,
+                                                                  y.upper,
+                                                                  change,
+                                                                  paste0(nameofmeas)))
+                     rm(avgage,data.pred,y.pred,y.upper,y.lower)
+                     get(paste0("pred_",meas))
+                   }
+)
+
+output<-bind_rows(pro_models, .id = "id")%>%
+  mutate(brainmeas=as.factor(`paste0(nameofmeas)`))%>%
+  mutate(brainmeas=factor(brainmeas,levels=c("Total Gray Matter Volume","Cortex Volume","Mean Cortical Thickness","White Surface Area", "Cerebral White Matter Volume", "Subcortical Gray Matter Volume", "Amygdala", "Hippocampus","Thalamus","Pallidum","Caudate","Putamen"))) %>%
+  select(-`paste0(nameofmeas)`) %>%
+  mutate(id=as.integer(id))
+
+# Put the global neasures together
+globalmodelplot<-
+  ggplot(data=NULL,
+         aes(x=avgage,
+             y=change,
+             fill=brainmeas))+
+  ylab("Annualized percent change between observations")+
+  xlab("Age (years) as averaged between observations")+
+  ggtitle("Global and Cortical Measures")+
+  scale_color_manual(aesthetics = c("colour","fill"),
+                     name= "Brain Measure",
+                     labels = c("Total Gray Matter Volume","Cortex Volume","Mean Cortical Thickness",
+                                "White Surface Area", "Cerebral White Matter Volume"),
+                     values = c("#8338EC", "#FB5607","#FFBE0B","#FF006E","#3A86FF")) +
+  geom_hline(yintercept=0, 
+             linetype="dashed", 
+             colour="black",
+             size=1)+
+  geom_line(data=(output %>% filter(!id>=6)),
+            aes(x=avgage, y=change,
+             colour=brainmeas,
+             linetype=brainmeas),
+            size=1)+
+  geom_ribbon(data=(output %>% filter(!id>=6)),
+              aes(ymin=y.lower,
+                  ymax=y.upper),
+              alpha=0.3)+
+  theme_kate()+
+  labs(color  = "Brain Measure", linetype = "Brain Measure", fill = "Brain Measure")
+
+globalmodelplot
+
+ggsave(filename=paste0("globalmodelplot.png"),
+       plot=globalmodelplot, 
+       width=7, height=4, units='in', dpi=300)
+
+
+# Colorblind-friendly subcortical plot
+subcorticalmodelplot_cb<-
+  ggplot(data=NULL,
+         aes(x=avgage,
+             y=change,
+             fill=brainmeas))+
+  ylab("Annualized percent change between observations")+
+  xlab("Age (years) as averaged between observations")+
+  ggtitle("Subcortical Measures")+
+  scale_color_manual(aesthetics = c("colour","fill"),
+                     name= "Brain Measure",
+                     labels = c("Subcortical Gray Matter Volume", "Amygdala", "Hippocampus","Thalamus","Pallidum","Caudate","Putamen"),
+                     values = c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  geom_hline(yintercept=0, 
+             linetype="dashed", 
+             colour="black",
+             size=1.5)+
+  geom_line(data=(output %>% filter(id>=6)),
+            aes(x=avgage, y=change, 
+             colour=brainmeas,
+             linetype=brainmeas),
+            size=1)+
+  geom_ribbon(data=(output %>% filter(id>=6)),
+              aes(ymin=y.lower,
+                  ymax=y.upper),
+              alpha=0.2)+
+  theme_kate()+
+  labs(color  = "Brain Measure", linetype = "Brain Measure", fill = "Brain Measure")
+
+subcorticalmodelplot_cb
+
+ggsave(filename=paste0("subcorticalmodelplot_colorblindfriendly.png"),
+       plot=subcorticalmodelplot_cb, 
+       width=7, height=4, units='in', dpi=300)
+
+
+# Put the subcortical measures together
+subcorticalmodelplot<-
+  ggplot(data=NULL,
+         aes(x=avgage,
+             y=change,
+             fill=brainmeas))+
+  ylab("Annualized percent change between observations")+
+  xlab("Age (years) as averaged between observations")+
+  ggtitle("Subcortical Measures")+
+  scale_color_manual(aesthetics = c("colour","fill"),
+                     name= "Brain Measure",
+                     labels = c("Subcortical Gray Matter Volume", "Amygdala", "Hippocampus","Thalamus","Pallidum","Caudate","Putamen"),
+                     values = c("#FFBE0B", "#FB5607","#FD2B3B",
+                                "#FF006E","#C11CAD","#A22ACD","#8338EC","#3A86FF")) +
+  geom_hline(yintercept=0, 
+             linetype="dashed", 
+             colour="black",
+             size=1)+
+  geom_line(data=(output %>% filter(id>=6)),
+            aes(x=avgage, y=change, 
+             colour=brainmeas,
+             shape=brainmeas),
+            size=1)+
+  geom_ribbon(data=(output %>% filter(id>=6)),
+              aes(ymin=y.lower,
+                  ymax=y.upper),
+              alpha=0.2)+
+  theme_kate()
+
+subcorticalmodelplot
+
+ggsave(filename=paste0("subcorticalmodelplot.png"),
+       plot=subcorticalmodelplot, 
+       width=7, height=4, units='in', dpi=300)
+```
+
+
+Loop through brain vars to assess if females and males differ in developmental change patterns for proportional measures
+```{r}
+lapply(X = 1,
+               FUN = function(X){
+                 meas=as.character(bothvarlists[X,1])
+                 nameofmeas=as.character(bothvarlists[X,2])
+                 
+                 brainchange<-data %>% 
+                   select("Subject",
+                          "visit",
+                          meas) %>%
+                   spread(visit, meas) %>%
+                    mutate(wave12=(((`2`-`1`)/((`1`+`2`)/2))*100),
+                          wave23=(((`3`-`2`)/((`2`+`3`)/2))*100)) %>%
+                   mutate(`1`=wave12,
+                          `2`=wave23) %>%
+                   select(Subject,`1`,`2`)%>%
+                   gather(visit,brainchange,2:3)
+                 
+                 changechange<-left_join(agechange,brainchange) %>%
+                   mutate(change=brainchange/agechange) 
+                
+                 plotdata<-(left_join(data,changechange))
+                 plotdata$sex<-as.ordered(plotdata$sex)
+                
+                
+                 assign(paste0("gammmod_fullsexint_",meas),
+                        gamm(change ~ sex +
+                               s(avgage,bs = "cs",k=4) + 
+                               s(avgage,by=sex,k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                 
+                 assign(paste0("gammmod_mainsexint_",meas),
+                        gamm(change ~ sex + s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                 
+                  assign(paste0("gammmod_ageonly_",meas),
+                        gamm(change ~ s(avgage,bs = "cs",k=4),
+                            random=list(Subject=~1),
+                            data=(plotdata)))
+                  
+                  assign(paste0("modcompare_",meas),
+                        anova(get(paste0("gammmod_ageonly_",meas))$lme,
+                        get(paste0("gammmod_mainsexint_",meas))$lme,
+                        get(paste0("gammmod_fullsexint_",meas))$lme))
+                 
+                 print(meas)
+                 #get(paste0("modcompare_",meas))
+                 #get(paste0("gammmod_ageonly_",meas))$lme
+                 get(paste0("gammmod_mainsexint_",meas))$lme
+                 #get(paste0("gammmod_fullsexint_",meas))$lme
+               }
+)
+```
+
+
+Plot the raw values for each measure
+```{r}
+lapply(X = 1:12,
+       FUN = function(X){
+         meas=as.character(bothvarlists[X,1])
+         nameofmeas=as.character(bothvarlists[X,2])
+         
+         plotdata<-data %>%
+           select("Subject",
+                  "visit",
+                  meas,
+                  "dataset",
+                  "age",
+                  "sex")
+         names(plotdata)[3]<-"fit"
+         
+         assign(paste0("gammmod_",meas),
+                gamm(fit ~ s(age,bs = "cs",k=4),
+                     random=list(Subject=~1),
+                     data=(plotdata)))
+         summary(get(paste0("gammmod_",meas))$gam)
+         
+         age<-round(seq(min(plotdata$age,na.rm = TRUE),
+                        max(plotdata$age,na.rm = TRUE),by=1),2)
+         data.pred = data.frame(age=age)
+         y.pred = predict(get(paste0("gammmod_",meas))$gam,
+                          newdata=data.pred,se=T)
+         data.pred = cbind.data.frame(data.pred,
+                                      y.pred)
+         scale = 1.96
+         y.upper = y.pred$fit + (scale*y.pred$se.fit)
+         y.lower = y.pred$fit - (scale*y.pred$se.fit)
+         assign(paste0("pred_",meas),cbind.data.frame(data.pred,
+                                                      y.lower,
+                                                      y.upper,
+                                                      nameofmeas))
+         rm(age,data.pred,y.pred,y.upper,y.lower)
+         get(paste0("pred_",meas))
+         
+         assign(paste0("rawplot_",meas),
+                ggplot(data=NULL,
+                       aes(x=age,
+                           y=fit))+
+                  ylab(nameofmeas) +
+                  xlab("Age (years)")+
+                  geom_line(data=plotdata,
+                            aes(group=Subject,
+                                colour=dataset),
+                            alpha=0.4,
+                            size=.6) +
+                  geom_point(data=plotdata,
+                             aes(colour=dataset),
+                             size=1.5,
+                             alpha=0.5) +
+                  scale_color_manual(name= "dataset",
+                                     labels = c("BrainTime","NCD", "LunaCog"),
+                                     values = c("forestgreen","dodgerblue", "orchid"))+
+                  geom_line(data=get(paste0("pred_",meas)),
+                            aes(x=age, y=fit),
+                            size=1.5)+
+                  geom_ribbon(data=get(paste0("pred_",meas)),
+                              aes(ymin=y.lower,
+                                  ymax=y.upper),
+                              alpha=0.4)+
+                  theme_kate())
+         
+         ggsave(filename=paste0("rawplot_",meas,".png"),
+                plot=get(paste0("rawplot_",meas)), 
+                width=7, height=4, units='in', dpi=300)
+       }
+)
+
+
+```
+
+#########################################################
+
+########### KIM, CHUN, & MEGAN SECTIONS #################
+
+#########################################################
+Plot group level maps with age as a factor to see the non-linear pattern across ages
+```{r}
+ggplotsmoothplots<-lapply(X = 1:length(vars),
+               FUN = function(X){
+                 data$sex <- factor(data$sex,levels=c("male","female"))
+                 p <- ggplot(data = data,
+                             aes(x = age, 
+                                 y = get(vars[X]), 
+                                 group = Subject)) + 
+                   geom_line(aes(color=dataset)) +
+                   facet_grid(~sex) + 
+                   stat_smooth(aes(group = 1)) + 
+                   ylab(vars[X])
+               })
+ggplotsmoothplots
+```
+
+The data are balanced, with each subject measured on 3 visits. How old are the subjects at visits 1, 2 and 3 at the different study centers?
+
+```{r getsubjlevelavgs}
+data.o <- arrange(data,dataset,Subject,age)%>%  
+  select(dataset,Subject,visit,age,sex) %>%
+  group_by(dataset,visit,sex) %>%
+  summarize(avg_age = mean(age),
+            std_age = sd(age))
+```
+
+Note that the trend for BT is from approximately 15 - 19 years (4 years). For DV it's from 14 - 21 years (7 years) and for LC its from 15 - 18 years (3 years). Males at BT tend to be 6 months older on average than the females, but there are no differences in age by sex in the other 2 studies. The longer + older years for DV might make for flatter trends because the lines stradle the flattening end of the curve.  The lines for LC might be steeper due to being younger and shorter time periods.
+
+Natural cubic spline, Random intercepts & Slopes (RIS)
+```{r facetplot, echo=FALSE}
+ggplotfacetplots<-lapply(X = 1:length(vars),
+                         FUN = function(X){
+                           p <- ggplot(data = data,
+                                       aes(x = age,
+                                           y=get(vars[X]),
+                                           group = Subject)) +
+                            geom_line(aes(color=dataset)) +
+                            facet_grid(sex~dataset) +
+                            stat_smooth(aes(group = 1)) +
+                            ylab(vars[X])
+                         })
+
+ggplotfacetplots
+```
+
+
+Interactions between age and sex in the model to see if the age trend is different in males and females.
+
+```{r fdata}
+fdata <- data %>%
+                mutate(popcentage = age-mean(data$age))
+
+fS <- fdata %>%
+  group_by(Subject) %>%
+  summarise(ssTGV = mean(TotalGrayVol),
+            ssWSA = mean(WhiteSurfArea_area),
+            ssCWM = mean(CerebralWhiteMatterVol),
+            ssCGM = mean(CortexVol),
+            ssTh  = mean(MeanThickness_thickness),
+            ssSGM = mean(SubCortGrayVol),
+            ssThal= mean(ThalamusProper),
+            ssCaud= mean(Caudate),
+            ssPut = mean(Putamen),
+            ssPal = mean(Pallidum),
+            ssHip = mean(Hippocampus),
+            ssAmy = mean(Amygdala),
+            ssNA  = mean(AccumbensArea)) %>%
+  mutate(centssTGV = ssTGV - mean(ssTGV),
+         centssWSA = ssWSA - mean(ssWSA),
+         centssCWM = ssCWM - mean(ssCWM),
+         centssCGM = ssCGM - mean(ssCGM),
+         centssTh  = ssTh  - mean(ssTh),
+         centssSGM = ssSGM - mean(ssSGM), 
+         centssThal= ssThal- mean(ssThal), 
+         centssCaud= ssCaud- mean(ssCaud),
+         centssPut = ssPut - mean(ssPut), 
+         centssPal = ssPal - mean(ssPal),
+         centssHip = ssHip - mean(ssHip),
+         centssAmy = ssAmy - mean(ssAmy),
+         centssNA  = ssNA  - mean(ssNA)) %>%
+  mutate(centssTGV = centssTGV/1000, 
+         centssWSA = centssWSA/1000, 
+         centssCWM = centssCWM/1000, 
+         centssCGM = centssCGM/1000, 
+         centssSGM = centssCGM/1000) %>%
+  select(Subject,ssTGV,centssTGV, ssWSA, centssWSA, ssCWM, centssCWM, ssCGM, centssCGM, ssTh, centssTh, ssSGM, centssSGM, ssThal, centssThal, ssCaud, centssCaud, ssPut, centssPut, ssPal, centssPal, ssHip, centssHip, ssAmy, centssAmy, ssNA, centssNA)
+        
+
+fS2 <- fdata %>%
+        filter(visit==1) %>%
+        select(Subject,dataset,sex)
+
+
+fS2 <- merge(fS,fS2)
+
+fdata <- merge(fS,fdata) %>%
+            mutate(scTGV = TotalGrayVol/1000, 
+                   scWSA = WhiteSurfArea_area/1000,
+                   scCWM=CerebralWhiteMatterVol/1000, 
+                   scCGM=CortexVol/1000, 
+                   scTh=MeanThickness_thickness, 
+                   scSGM=SubCortGrayVol/1000, 
+                   scThal=ThalamusProper, 
+                   scCaud=Caudate,	
+                   scPut=Putamen, 
+                   scPal=Pallidum, 
+                   scHip=Hippocampus, 
+                   scAmy=Amygdala, 
+                   scNA=AccumbensArea)  %>%
+            mutate(centssTGVxpcage = centssTGV * popcentage, 
+                   centssWSAxpcage = centssWSA * popcentage, 
+                   centssCWMxpcage = centssCWM * popcentage, 
+                   centssCGMxpcage = centssCGM * popcentage, 
+                   centssThxpcage = centssTh * popcentage, 
+                   centssSGMxpcage = centssSGM * popcentage, 
+                   centssThalxpcage = centssThal * popcentage,
+                   centssCaudxpcage = centssCaud * popcentage, 
+                   centssPutxpcage = centssPut * popcentage, 
+                   centssPalxpcage = centssPal * popcentage, 
+                   centssHipxpcage = centssHip * popcentage, 
+                   centssAmyxpcage = centssAmy * popcentage, 
+                   centssNAxpcage = centssNA * popcentage)  %>%
+            mutate(IDV = ifelse(dataset=="DV",1,0),
+                   ILC = ifelse(dataset=="LC",1,0)) %>%
+            mutate(centDV = IDV - mean(IDV),
+                   centLC = ILC - mean(ILC))
+
+```
+
+
+```{r f1}
+  
+##TGV
+f1_TGV <- gam(scTGV ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssTGVxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f1_TGV)
+
+library(sjPlot)
+plot_model(f1_TGV, type = "pred", terms = c("popcentage", "sex")) ##Sex diff in group-level age rates
+plot_model(f1_TGV, type = "pred", terms = c("centssTGVxpcage", "sex")) ##Sex differences in individual rates of change
+plot_model(f1_TGV, type = "int")[[1]] ##Sex diff in group-level age rates
+plot_model(f1_TGV, type = "int")[[2]] ##Sex differences in individual rates of change
+
+##WSA
+f2_WSA <- gam(scWSA ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssWSAxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f2_WSA)
+
+##CWM
+f3_CWM <- gam(scCWM ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssCWMxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f3_CWM)
+
+##CGM
+f4_CGM <- gam(scCGM ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssCGMxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f4_CGM)
+
+##Th
+f5_Th <- gam(scTh ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssThxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f5_Th)
+
+##SGM
+f6_SGM <- gam(scSGM ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssSGMxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f6_SGM)
+
+##Thal
+f7_Thal <- gam(scThal ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssThalxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f7_Thal)
+
+##Caud
+f8_Caud <- gam(scCaud ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssCaudxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f8_Caud)
+
+##Put
+f9_Put <- gam(scPut ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssPutxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f9_Put)
+
+
+##Pal
+f10_Pal <- gam(scPal ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssPalxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f10_Pal)
+
+##Hip
+f11_Hip <- gam(scHip ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssHipxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f11_Hip)
+
+##Amy
+f12_Amy <- gam(scAmy ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssAmyxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f12_Amy)
+
+##NA
+f13_NA <- gam(scNA ~ ns(popcentage ,df=4) + popcentage +
+                   dataset + sex*popcentage + 
+                    sex*centssNAxpcage  + 
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f13_NA)
+
+tab_model(f1_TGV, f6_SGM, f4_CGM, f5_Th, f2_WSA, f3_CWM)
+
+tab_model(f7_Thal,f8_Caud,f9_Put,f10_Pal,f11_Hip,f12_Amy,f13_NA)
+```
+
+The trends are different. The trend decreases more quickly in females than males (difference in trends = -0.19, p=0.0002). This can be seen from the population-based curves:
+```{r plots, echo=FALSE}
+
+scvars<-c("scTGV", "scWSA", "scCWM", "scCGM", "MeanThickness_thickness", "SubCortGrayVol", "ThalamusProper", "Caudate",	"Putamen", "Pallidum", "Hippocampus", "Amygdala", "AccumbensArea")
+
+centssvars<-c("centssTGVxpcage", "centssWSAxpcage", "centssCWMxpcage", "centssCGMxpcage", "centssThxpcage", "centssSGMxpcage", "centssThalxpcage", "centssCaudxpcage", "centssPutxpcage", "centssPalxpcage", "centssHipxpcage", "centssAmyxpcage", "centssNAxpcage")
+
+varmatrix=cbind(scvars,centssvars)
+
+
+for (i in nrow(varmatrix)){
+form <- as.formula(paste0(varmatrix[i,1], '~ ns(popcentage ,df=4) + popcentage + dataset + sex*popcentage + sex*', varmatrix[i,2], '+ s(popcentage,Subject,bs="re") + s(Subject,bs="re")'))
+
+model <- gam(formula=form, method="REML", data=fdata)
+summary(model)
+
+varmatrix[i,2]
+
+nd <- cbind.data.frame(popcentage=fdata$popcentage,
+                       age = fdata$age,
+                       dataset = fdata$dataset,
+                       assign(varmatrix[i,2],rep(0,nrow(fdata))),
+                       Subject = fdata$Subject,
+                       sex = fdata$sex)
+names(nd)[names(nd)=="assign(varmatrix[i, 2], rep(0, nrow(fdata)))"] <- as.character(varmatrix[i,2])
+
+pv <- cbind.data.frame(nd,
+                       popmn = predict.gam(model,newdata=nd,
+                            exclude=c("s(popcentage,Subject)",
+                                  "s(Subject)"))
+                      )
+pv <- pv %>%
+        arrange(popcentage)
+
+f <-paste0("~/Downloads/pop_mean_dataset_plot",varmatrix[i,2], ".jpg")
+jpeg(f)
+
+par(mfrow=c(1,2))
+idxBTm <- which(pv$dataset=="BT" & pv$sex=="male")
+idxDVm <- which(pv$dataset=="DV" & pv$sex=="male")
+idxLCm <- which(pv$dataset=="LC" & pv$sex=="male")
+plot(pv$age[idxBTm],pv$popmn[idxBTm],type="l",col=2,
+     xlab="age",ylab=varmatrix[i,2],
+     ylim=c(min(pv$popmn),max(pv$popmn)),
+     main="Male: Population mean")
+lines(pv$age[idxDVf],pv$popmn[idxDVf],col=3)
+lines(pv$age[idxLCf],pv$popmn[idxLCf],col=4)
+legend(quantile(pv$age,0.6),max(pv$popmn),
+       c("BT ", 
+         "DV",
+         "LC"),
+       col=c(2,3,4),lty=c(1,1,1))
+idxBTf <- which(pv$dataset=="BT" & pv$sex=="female")
+idxDVf <- which(pv$dataset=="DV" & pv$sex=="female")
+idxLCf <- which(pv$dataset=="LC" & pv$sex=="female")
+plot(pv$age[idxBTf],pv$popmn[idxBTf],type="l",col=2,
+     xlab="age",ylab=varmatrix[i,2],
+     ylim=c(min(pv$popmn),max(pv$popmn)),
+     main="Female: Population mean")
+lines(pv$age[idxDVf],pv$popmn[idxDVf],col=3)
+lines(pv$age[idxLCf],pv$popmn[idxLCf],col=4)
+legend(quantile(pv$age,0.6),max(pv$popmn),
+       c("BT", 
+         "DV",
+         "LC"),
+       col=c(2,3,4),lty=c(1,1,1))
+dev.off()
+
+}
+```
+
+The female curves are more steep than the male curves, and cover a wider range of TGV for the same difference in age. Now plot the sex difference 
+
+```{r plots, echo=FALSE}
+
+varmatrix=cbind(scvars,centssvars)
+
+
+for (i in 1:nrow(varmatrix)){
+form <- as.formula(paste0(varmatrix[i,1], '~ ns(popcentage ,df=4) + popcentage + centDV + centLC + sex*popcentage + sex*', varmatrix[i,2], '+ s(popcentage,Subject,bs="re") + s(Subject,bs="re")'))
+
+model <- gam(formula=form, method="REML", data=fdata)
+summary(model)
+
+varmatrix[i,2]
+
+summary(model)
+nd <- cbind.data.frame(popcentage=fdata$popcentage,
+                       age = fdata$age,
+                       centDV = rep(0,nrow(fdata)),
+                       centLC = rep(0,nrow(fdata)),
+                       assign(varmatrix[i,2],rep(0,nrow(fdata))),
+                       Subject = fdata$Subject,
+                       sex = fdata$sex)
+names(nd)[names(nd)=="assign(varmatrix[i, 2], rep(0, nrow(fdata)))"] <- as.character(varmatrix[i,2])
+
+
+pv <- cbind.data.frame(nd,
+                       popmn = predict.gam(model,newdata=nd,
+                            exclude=c("s(popcentage,Subject)",
+                                  "s(Subject)"))
+                      )
+pv <- pv %>%
+        arrange(popcentage)
+
+f <-paste0("~/Downloads/sex_diff_plot",varmatrix[i,2], ".jpg")
+jpeg(f)
+
+plot(pv$age[pv$sex=="male"],pv$popmn[pv$sex=="male"],type="l",col=2,
+     xlab="age",ylab=varmatrix[i,2],
+     ylim=c(min(pv$popmn),max(pv$popmn)),
+     main="Population mean")
+lines(pv$age[pv$sex=="female"],pv$popmn[pv$sex=="female"],col=3)
+legend(quantile(pv$age,.9),max(pv$popmn),c("male ","female"),
+       col=c(2,3),lty=c(1,1))
+dev.off()
+}
+
+```
+
+
+## 1. Predicted fitted curves
+
+A sample of 12:
+
+```{r fittedcurves}
+# setup prediction data
+TGV_pred <- with(fdata,
+                     expand.grid(popcentage=seq(min(popcentage),
+                           max(popcentage), length=50),
+                      Subject=levels(Subject)))
+# include subj-level covariates:
+TGV_pred <- merge(TGV_pred,fS2,all=T)
+TGV_pred <- TGV_pred %>%
+                  mutate(centssTGVxpcage = centssTGV * popcentage)
+
+# make the prediction, add this and a column of standard errors to the prediction data frame
+TGV_pred <- cbind(TGV_pred,
+                       predict(f1_TGV, 
+                               TGV_pred, 
+                               se.fit=TRUE, 
+                               type="response"))
+
+# can only show 12 subjects at a time clearly. 
+subjid <- unique(fdata$Subject)
+row.idx<-which(is.element(fdata$Subject,subjid[1:12]))
+pred.idx <- which(is.element(TGV_pred$Subject,subjid[1:12]))
+ggplot(data=fdata[row.idx,], 
+       aes(x=popcentage, y=scTGV, group=Subject)) +
+  facet_wrap(~Subject) +
+        geom_ribbon(aes(ymin=fit - 2*se.fit, 
+                  ymax=fit + 2*se.fit, x=popcentage),
+              data=TGV_pred[pred.idx,], 
+              alpha=0.3, 
+              inherit.aes=FALSE) +
+  geom_line(aes(y=fit), data=TGV_pred[pred.idx,]) +
+  geom_point() +
+  labs(x=expression(popcentage),
+       y=expression("Predicted TGV"))
+```
+
+Residual plots:
+
+```{r rplot,echo=FALSE}
+
+pv <- cbind.data.frame(popcentage=fdata$popcentage,
+                       popmn=pv$popmn,dataset=fdata$dataset, 
+                       sex = fdata$sex,
+                       residual=resid(f1_TGV))
+p <- ggplot(data = pv ,aes(x = popcentage, y = residual))
+print(p + geom_point(aes(color=dataset))+facet_grid(sex~dataset)+ stat_smooth(aes(group = 1),method="lm")+ylab("resid(scaledTGV)"))
+```
+
+I recode the variables so that I can estimate the trends in females directly, instead of estimating the interaction term measuring the differences between males and females.
+
+```{r sexests}
+female <- ifelse(fdata$sex=="female",1,0)
+f2 <- gam(scTGV ~ ns(popcentage ,df=4) + I(popcentage*(1-female)) + dataset + female +  
+                   I(female*popcentage) + I(centssTGVxpcage*(1-female))  + 
+                   I(centssTGVxpcage*female) +
+                   s(popcentage,Subject,bs="re") +
+                   s(Subject,bs="re"),method="REML",
+                  data=fdata)
+summary(f2)
+```
